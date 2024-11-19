@@ -15,66 +15,87 @@ def extract_content_from_word(file_path):
     remarks = ""
     reading_questions = False
     question_count = 0
+    is_multiple_choice = False
+    is_true_false = False
 
-    # Extract file name for title
     title = os.path.splitext(os.path.basename(file_path))[0]
 
     for para in document.paragraphs:
         text = para.text.strip()
-        
-        # Start reading after "Quiz Questions"
+
         if "Quiz Questions" in text:
             reading_questions = True
-            continue  # Skip this line
+            continue
 
         if reading_questions:
-            # Check for question numbers (supporting 1. to 20. using regular expression)
             match = re.match(r"^(\d+)\.\s+(.*)", text)
             if match:
                 question_number = int(match.group(1))
-                if 1 <= question_number <= 20:  # Ensure question number is within range
-                    if current_question:  # Add the previous question if it's there
-                        questions.append((current_question, answers, correct_answer, remarks, question_count))
-                    current_question = match.group(2)  # Get the question text after the number and dot
-                    answers = []  # Reset answers for new question
-                    correct_answer = ""  # Reset correct answer flag
-                    remarks = ""  # Reset remarks flag
-                    question_count = question_number  # Set the question counter based on actual question number
-            elif text.startswith("Correct Answer:"):
-                correct_answer = text.split(":")[-1].strip()
-            elif text.startswith("Rationale:"):
-                remarks = text.split(":")[-1].strip()  # Capture remarks from Rationale
-            elif text.startswith("•"):  # Detect bullet points for answers
-                answers.append(text[2:].strip())  # Skip the bullet character and space
-            elif text and len(text) > 1 and text[0] in ['A', 'B', 'C', 'D', 'E'] and text[1] == ')':
-                answers.append(text[2:].strip())  # Capture the answer text for A), B), C), D)
+                if 1 <= question_number <= 20:
+                    if current_question:
+                        questions.append((current_question, answers, correct_answer, remarks, question_count, is_true_false, is_multiple_choice))
+                    current_question = match.group(2)
+                    answers = []
+                    correct_answer = ""
+                    remarks = ""
+                    question_count = question_number
+                    is_true_false = current_question.startswith("True or False:")
+                    is_multiple_choice = current_question.startswith("Select all that apply:")
+            elif text.startswith("Answer:") or text.startswith("Correct Answer:"):
+                if is_multiple_choice:
+                    # Split multiple correct answers into a list of letters
+                    correct_answer = "|".join([f"answer{['A', 'B', 'C', 'D', 'E'].index(ans.strip()[0]) + 1}" for ans in text.split(":")[1].split(",")])
+                else:
+                    correct_answer = text.split(":")[1].strip()[0]  # Single answer (A, B, etc.)
+                if "Rationale:" in text:
+                    # Handle combined Correct Answer and Rationale in one line
+                    parts = re.split(r"Rationale:", text, maxsplit=1)
+                    if len(parts) > 1:
+                        remarks = parts[1].strip()  # Extract the rationale                        
+                    else:
+                        remarks = ""               
 
-        elif text:  # Collect other text as paragraphs
+            elif "Rationale:" in text:
+                # Handle standalone Rationale
+                remarks = text.split(":", 1)[1].strip()
+                
+            elif text.startswith("•") or re.match(r"^[A-E]\)", text):
+                # Check if multiple options exist in the same line
+                options = re.split(r"(?<!^)\s+(?=[A-E]\))", text)
+                if len(options) > 1:  # Multiple options in the same line
+                    for option in options:
+                        match = re.match(r"^[A-E]\)", option)
+                        if match:
+                            answers.append(option[3:].strip())  # Skip 'A)', 'B)', etc.
+                else:
+                    # Single option, handle normally
+                    if text.startswith("•"):
+                        answers.append(text[2:].strip())  # Bullet point
+                    elif re.match(r"^[A-E]\)", text):
+                        answers.append(text[3:].strip())  # Lettered option
+
+            # elif text.startswith("•") or (len(text) > 1 and text[0] in ['A', 'B', 'C', 'D', 'E'] and text[1] == ')'):
+            #     answers.append(text[2:].strip())
+
+        elif text:
             paragraphs.append(text)
 
-    # Add the last question if any
     if current_question:
-        questions.append((current_question, answers, correct_answer, remarks, question_count))
+        questions.append((current_question, answers, correct_answer, remarks, question_count, is_true_false, is_multiple_choice))
 
-    # Convert paragraphs to HTML format
-    description = "<br>".join(paragraphs)  # Simple line break for HTML
-
+    description = "<br>".join(paragraphs)
     return title, description, questions
 
 def create_csv_files(title, paragraphs, questions):
-    # Generate unique identifiers
     quiz_uuid = uuid.uuid4().hex[:8]
     questions_uuid = uuid.uuid4().hex[:8]
 
-    # Create a directory for generated files if it doesn't exist
     generated_folder = os.path.join(os.getcwd(), "generated_files")
     os.makedirs(generated_folder, exist_ok=True)
 
-    # Create a subdirectory for this run using the quiz title
     specific_folder = os.path.join(generated_folder, title)
     os.makedirs(specific_folder, exist_ok=True)
 
-    # First CSV file - Metadata
     metadata_filename = os.path.join(specific_folder, f"quiz_{quiz_uuid}_metadata.csv")
     df_meta = pd.DataFrame({
         "Title": [title],
@@ -83,33 +104,26 @@ def create_csv_files(title, paragraphs, questions):
     })
     df_meta.to_csv(metadata_filename, index=False)
 
-    # Second CSV file - Questions
     question_data = []
-    for question, answers, correct_answer, remarks, order in questions:
-        # Map correct_answer to the correct answer field
-        correct_answer_mapped = ""
-        if correct_answer == "A":
-            correct_answer_mapped = "answers1"
-        elif correct_answer == "B":
-            correct_answer_mapped = "answers2"
-        elif correct_answer == "C":
-            correct_answer_mapped = "answers3"
-        elif correct_answer == "D":
-            correct_answer_mapped = "answers4"
-        elif correct_answer == "E":
-            correct_answer_mapped = "answers5"
+    for question, answers, correct_answer, remarks, order, is_true_false, is_multiple_choice in questions:
+        if is_true_false:
+            answers = ["TRUE", "FALSE"]
+            correct_answer_mapped = "answer1" if correct_answer.upper() == "TRUE" else "answer2"
+        elif is_multiple_choice:
+            correct_answer_mapped = correct_answer  # Already formatted as "answer1|answer3|answer4"
+        else:
+            correct_answer_mapped = f"answer{['A', 'B', 'C', 'D', 'E'].index(correct_answer) + 1}" if correct_answer else ""
 
-        # Ensure all required columns are included, even if empty
         answer_dict = {
             "question": question,
-            "question_type": "single_choice",  # Assuming question type is multiple-choice
+            "question_type": "multiple_choice" if is_multiple_choice else "true_false" if is_true_false else "single_choice",
             "answer1": answers[0] if len(answers) > 0 else "",
             "answer2": answers[1] if len(answers) > 1 else "",
             "answer3": answers[2] if len(answers) > 2 else "",
             "answer4": answers[3] if len(answers) > 3 else "",
             "answer5": answers[4] if len(answers) > 4 else "",
-            "correct_answer": correct_answer_mapped,  # Mapped correct answer
-            "score": "",  # Add an empty score field if unspecified
+            "correct_answer": correct_answer_mapped,
+            "score": 1,
             "remarks": remarks,
             "ordering": order
         }
@@ -135,12 +149,10 @@ def open_file_dialog():
     else:
         label_status.config(text="No files selected.")
 
-# Set up the GUI
 root = Tk()
 root.title("Word to CSV Converter")
 root.geometry("400x200")
 
-# Label and Button
 label_instructions = Label(root, text="Select Word document(s) to generate CSV files:")
 label_instructions.pack(pady=20)
 
